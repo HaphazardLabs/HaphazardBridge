@@ -37,8 +37,10 @@ HaphazardNet AP (192.168.4.1)
 |---|---|---|
 | **gRPC** | ATAK → `192.168.10.178:8000` → SDR | ATAK → `192.168.4.1:8000` → SDR |
 | **CoT UDP** | SDR → ATAK via NAT | SDR → `192.168.99.1:4242` → ESP32 → AP broadcast |
-| **SDR web UI** | `http://192.168.10.178:8888` | `http://192.168.4.1:8888` |
-| **SAPIENT** | SDR → ATAK via NAT | SDR → ATAK via routing |
+| **SDR web UI** | `http://192.168.10.178:8888` | `http://192.168.99.234` direct (any port) |
+| **SAPIENT** | SDR → ATAK via NAT | SDR → ATAK via NAT |
+
+> **Dismounted Mode — bidirectional NAT:** ATAK can reach the SDR directly at `192.168.99.234` on any port. No port forwarding needed — the ESP32 NATs AP↔ETH transparently in both directions.
 
 ---
 

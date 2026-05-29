@@ -10,7 +10,8 @@ HaphazardBridge sits between an SDR (Ethernet) and an ATAK device (WiFi). It ope
 
 | Service | Description |
 |---|---|
-| **NAT** | Routes outbound SDR traffic onto the WiFi network transparently |
+| **NAT (ETH→WiFi)** | Routes outbound SDR traffic onto the WiFi network transparently |
+| **NAT (AP→ETH)** | Routes ATAK traffic to the SDR on any port — no port forwarding needed (Dismounted Mode) |
 | **gRPC forward** | Bridges ATAK's plugin connection to the SDR's gRPC server |
 | **CoT TCP relay** | Accepts TCP CoT connections and relays to a configured target |
 | **CoT UDP relay** | Receives CoT UDP from the SDR and rebroadcasts to ATAK (Dismounted Mode) |
@@ -84,22 +85,26 @@ HaphazardNet AP
 
 ### Dismounted Mode
 ```
-┌─────────────────────────────────────────────────────┐
-│              HaphazardNet AP (192.168.4.x)           │
-│  ┌────────────────┐      ┌──────────────────────┐   │
-│  │  ATAK Device   │      │   HaphazardBridge    │   │
-│  │  192.168.4.x   │      │   AP: 192.168.4.1    │   │
-│  │ plugin → :8000─┼──────┼→ gRPC fwd → SDR:8000│   │
-│  │ CoT UDP ← :4242┼──────┼← UDP relay ←────────│   │
-│  └────────────────┘      │   ETH: 192.168.99.1  │   │
-└──────────────────────────┴──────────┬────────────┘──┘
-                                      │ Ethernet
-                      ┌───────────────▼──────────────┐
-                      │          SDR Device          │
-                      │      192.168.99.234 (static) │
-                      │      Gateway: 192.168.99.1   │
-                      │  CoT UDP → 192.168.99.1:4242 │
-                      └──────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│              HaphazardNet AP (192.168.4.x)               │
+│  ┌────────────────┐      ┌────────────────────────────┐  │
+│  │  ATAK Device   │      │      HaphazardBridge       │  │
+│  │  192.168.4.x   │      │      AP: 192.168.4.1       │  │
+│  │                │      │      ETH: 192.168.99.1     │  │
+│  │ plugin → :8000─┼──────┼→ gRPC fwd → SDR:8000      │  │
+│  │ CoT UDP ← :4242┼──────┼← UDP relay ←──────────    │  │
+│  │                │      │                            │  │
+│  │ direct access ─┼──────┼→ NAT (AP→ETH) → SDR:any  │  │
+│  │ 192.168.99.234 │      │                            │  │
+│  └────────────────┘      └──────────────┬─────────────┘  │
+└─────────────────────────────────────────┼────────────────┘
+                                          │ Ethernet
+                          ┌───────────────▼──────────────┐
+                          │          SDR Device          │
+                          │      192.168.99.234 (static) │
+                          │      Gateway: 192.168.99.1   │
+                          │  CoT UDP → 192.168.99.1:4242 │
+                          └──────────────────────────────┘
 ```
 
 ---
@@ -136,8 +141,11 @@ HaphazardNet AP
 |---|---|
 | gRPC | ATAK → `192.168.4.1:8000` → ESP32 → SDR:8000 |
 | CoT UDP | SDR → `192.168.99.1:4242` → ESP32 rebroadcasts → `192.168.4.255:4242` → ATAK |
-| SAPIENT | SDR → ATAK outbound via routing |
-| SDR web UI | Browser → `http://192.168.4.1:8888` → SDR:80 |
+| SAPIENT | SDR → ATAK outbound via NAT |
+| SDR web UI (direct) | Browser → `http://192.168.99.234` — any port, via bidirectional NAT |
+| SDR web UI (proxy) | Browser → `http://192.168.4.1:8888` → SDR:80 |
+
+> **Bidirectional NAT in Dismounted Mode:** ATAK devices on HaphazardNet can reach the SDR directly at `192.168.99.234` on any port — web UI, WebSocket, gRPC, or otherwise. No explicit port forwarding needed. The ESP32 NATs AP (192.168.4.x) traffic to appear as 192.168.99.1 to the SDR, and routes responses back to ATAK transparently.
 
 ---
 
@@ -185,7 +193,8 @@ HaphazardNet AP
 |---|---|
 | SDR plugin socket address | `192.168.4.1:8000` |
 | CoT UDP input port | `4242` |
-| SAPIENT client target | ATAK's IP on HaphazardNet (check ATAK settings) |
+| SAPIENT client target | `192.168.10.123` (unchanged — NAT handles routing) |
+| SDR web UI | Browse directly to `http://192.168.99.234` (preferred over proxy) |
 
 > **Version compatibility:** The ATAK SDR plugin and SDR software must be on matching versions. A mismatch shows "incompatible version" and clears the socket address.
 
@@ -210,7 +219,7 @@ HaphazardNet AP
 | Subnet mask | `255.255.255.0` |
 | Gateway | `192.168.99.1` |
 | CoT UDP target | `192.168.99.1:4242` *(ESP32 ETH — relayed to ATAK)* |
-| SAPIENT client target | `192.168.4.x` (ATAK's IP on HaphazardNet) |
+| SAPIENT client target | `192.168.10.123` *(unchanged — NAT routes through ESP32)* |
 | Static location (no GPS) | Lat `38.2362`, Lon `-78.3603` (Ruckersville, VA) |
 
 ---
@@ -311,9 +320,11 @@ s.close()
 [CoT UDP] Relay  → ETH:4242 → AP broadcast
 [Config] SDR CoT UDP target: 192.168.99.1:4242
 [Config] ATAK plugin socket: 192.168.4.1:8000
+[Config] SDR direct access:  192.168.99.234
 [OTA] Ready  hostname:HaphazardBridge  port:3232
 [ETH] Link up
 [Bridge] NAT active  ETH(192.168.99.x) → WiFi
+[Bridge] NAT active  AP(192.168.4.x) → ETH
 ```
 
 ---
@@ -345,9 +356,18 @@ assert failed: sys_timeout — Required to lock TCPIP core functionality!
 
 `ETH.config()` crashes if called from `ETH_CONNECTED` (lwIP is fully running by then). Static IP persists through link reconnects so one-time setup in `ETH_START` is sufficient.
 
+### Bidirectional NAT (Dismounted Mode)
+
+In Dismounted Mode, NAT is enabled in both directions:
+
+- **ETH→WiFi NAT** (both modes): SDR traffic out to the WiFi network
+- **AP→ETH NAT** (Dismounted only): ATAK traffic to the SDR on any port
+
+The AP NAT translates ATAK's source address (192.168.4.x) to 192.168.99.1 before forwarding to the SDR. The SDR routes responses to 192.168.99.1 (its gateway), and the ESP32 unNATs and delivers back to ATAK. This makes the full SDR — web UI, WebSocket, gRPC, any port — accessible directly at `192.168.99.234` without explicit port forwarding.
+
 ### Multi-connection proxy
 
-The SDR web UI proxy maintains a pool of 5 concurrent `(browser, sdr)` connection pairs. Modern browsers open multiple simultaneous connections to load CSS, JS, and images — a single-connection proxy causes partial loads and drops.
+The SDR web UI proxy maintains a pool of 5 concurrent `(browser, sdr)` connection pairs. Modern browsers open multiple simultaneous connections to load CSS, JS, and images — a single-connection proxy causes partial loads and drops. In Dismounted Mode, direct access to `192.168.99.234` via bidirectional NAT is preferred over the proxy.
 
 ### WiFiManager non-blocking mode
 
