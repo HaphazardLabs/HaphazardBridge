@@ -116,6 +116,21 @@ Hold **BOOT** for 3 seconds during normal operation → `HaphazardBridge-Setup` 
 
 ---
 
+## Roadmap
+
+| Version | Focus |
+|---|---|
+| **v1.7** | LED mode indicator, DHCP lease tracking, watchdog, QoL fixes |
+| **v1.8** | Auto mode fallback, roaming, multi-AP support |
+| **v2.0** | Mesh Mode — ESP-NOW/ESP-MESH-LITE for multi-unit dismounted ops |
+| **v2.1** | Security hardening — WPA3, MAC allowlist, OTA cert auth |
+
+Ideas under consideration: BLE CoT, GPS input, multi-SDR, status web page, ATAK server relay.
+
+See **[ROADMAP.md](ROADMAP.md)** for full detail and known limitations.
+
+---
+
 ## Full Documentation
 
 See **[HAPHAZARDBRIDGE.md](HAPHAZARDBRIDGE.md)** for:
