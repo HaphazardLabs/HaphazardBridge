@@ -124,8 +124,17 @@ static void napt_enable_cb(void *) {
     Serial.println("[Bridge] NAT active  ETH(192.168.99.x) → WiFi");
 }
 
+static void napt_ap_enable_cb(void *) {
+    ip_napt_enable(ipaddr_addr("192.168.4.1"), 1);
+    Serial.println("[Bridge] NAT active  AP(192.168.4.x) → ETH");
+}
+
 void enableNAT() {
     tcpip_callback(napt_enable_cb, nullptr);
+}
+
+void enableApNAT() {
+    tcpip_callback(napt_ap_enable_cb, nullptr);
 }
 
 void configEthStatic() {
@@ -430,9 +439,11 @@ void loop() {
         if (currentMode == MODE_DISMOUNTED) {
             cotUdp.begin(COT_UDP_PORT);
             udpRelayActive = true;
+            enableApNAT();  // ATAK → SDR on any port via NAT
             Serial.printf("[CoT UDP] Relay  → ETH:%d → AP broadcast\n", COT_UDP_PORT);
             Serial.println("[Config] SDR CoT UDP target: 192.168.99.1:4242");
             Serial.println("[Config] ATAK plugin socket: 192.168.4.1:8000");
+            Serial.println("[Config] SDR direct access:  192.168.99.234");
         } else {
             Serial.printf("[Config] ATAK plugin socket: %s:8000\n",
                           WiFi.localIP().toString().c_str());
