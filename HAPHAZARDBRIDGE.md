@@ -1,19 +1,20 @@
 # HaphazardBridge
 
-**ESP32-S3-ETH WiFi↔Ethernet bridge for connecting an SDR to ATAK over a WiFi network the SDR can't join directly.**
+**ESP32-S3-ETH WiFi↔Ethernet bridge for connecting an SDR to ATAK — without the SDR needing WiFi.**
 
 ---
 
 ## What It Does
 
-HaphazardBridge sits between an SDR (connected via Ethernet) and an ATAK device (connected via WiFi). It provides:
+HaphazardBridge sits between an SDR (Ethernet) and an ATAK device (WiFi). It operates in two modes selectable at boot, and provides:
 
 | Service | Description |
 |---|---|
-| **NAT** | Routes all outbound SDR traffic onto the WiFi network transparently |
+| **NAT** | Routes outbound SDR traffic onto the WiFi network transparently |
 | **gRPC forward** | Bridges ATAK's plugin connection to the SDR's gRPC server |
 | **CoT TCP relay** | Accepts TCP CoT connections and relays to a configured target |
-| **SDR web UI proxy** | Makes the SDR's web interface reachable from WiFi |
+| **CoT UDP relay** | Receives CoT UDP from the SDR and rebroadcasts to ATAK (Dismounted Mode) |
+| **SDR web UI proxy** | Makes the SDR's web interface reachable from WiFi (5 concurrent connections) |
 | **OTA updates** | Firmware updates over WiFi — no USB required after initial flash |
 
 ---
@@ -33,32 +34,72 @@ HaphazardBridge sits between an SDR (connected via Ethernet) and an ATAK device 
 
 ---
 
+## Operating Modes
+
+### Mobility Mode
+ESP32 connects to an upstream WiFi AP (e.g. a vehicle-mounted router) **and** simultaneously broadcasts its own **HaphazardNet** AP. ATAK can connect via either network.
+
+```
+HaphazardTAK AP (vehicle)
+    ├── HaphazardBridge (STA + AP)  ←── SDR (ETH)
+    │        └── HaphazardNet AP
+    │                 └── ATAK (direct)
+    └── ATAK (via vehicle AP)
+```
+
+### Dismounted Mode
+No upstream WiFi. ESP32 creates the **HaphazardNet** AP. ATAK connects directly to the bridge. Fully standalone — no vehicle or infrastructure needed.
+
+```
+HaphazardNet AP
+    ├── ATAK device (direct)
+    └── HaphazardBridge  ←── SDR (ETH)
+```
+
+---
+
 ## Network Layout
 
+### Mobility Mode
 ```
 ┌──────────────────────────────────────────────────────────┐
 │               HaphazardTAK WiFi (192.168.10.x)           │
-│                                                          │
 │  ┌───────────────────┐      ┌──────────────────────────┐ │
 │  │   ATAK Device     │      │    HaphazardBridge       │ │
-│  │  192.168.10.123   │      │  WiFi: 192.168.10.178    │ │
-│  │  callsign WOXOF   │      │  ETH:  192.168.99.1      │ │
-│  │                   │      │                          │ │
+│  │  192.168.10.123   │      │  STA:  192.168.10.178    │ │
 │  │ plugin → :8000 ───┼──────┼→ gRPC fwd → SDR:8000    │ │
-│  │ CoT UDP ← :4242 ──┼──────┼← NAT ←─────────────     │ │
-│  │ SAPIENT ←─────────┼──────┼← NAT ←─────────────     │ │
-│  └───────────────────┘      └──────────┬───────────────┘ │
-└─────────────────────────────────────────┼────────────────┘
-                                          │ Ethernet cable
-                          ┌───────────────▼──────────────┐
-                          │          SDR Device          │
-                          │      192.168.99.234 (static) │
-                          │      Gateway: 192.168.99.1   │
-                          │                              │
-                          │  gRPC server   port 8000     │
-                          │  CoT UDP out → 192.168.10.123:4242
-                          │  SAPIENT client → 192.168.10.123
-                          └──────────────────────────────┘
+│  │ CoT UDP ← :4242 ──┼──────┼← NAT ←────────────      │ │
+│  │ SAPIENT ←─────────┼──────┼← NAT ←────────────      │ │
+│  └───────────────────┘      │  AP:   192.168.4.1       │ │
+└─────────────────────────────┤  ETH:  192.168.99.1      │─┘
+                              └──────────┬───────────────┘
+                                         │ Ethernet
+                         ┌───────────────▼──────────────┐
+                         │          SDR Device          │
+                         │      192.168.99.234 (static) │
+                         │      Gateway: 192.168.99.1   │
+                         │  CoT UDP → 192.168.10.123:4242
+                         └──────────────────────────────┘
+```
+
+### Dismounted Mode
+```
+┌─────────────────────────────────────────────────────┐
+│              HaphazardNet AP (192.168.4.x)           │
+│  ┌────────────────┐      ┌──────────────────────┐   │
+│  │  ATAK Device   │      │   HaphazardBridge    │   │
+│  │  192.168.4.x   │      │   AP: 192.168.4.1    │   │
+│  │ plugin → :8000─┼──────┼→ gRPC fwd → SDR:8000│   │
+│  │ CoT UDP ← :4242┼──────┼← UDP relay ←────────│   │
+│  └────────────────┘      │   ETH: 192.168.99.1  │   │
+└──────────────────────────┴──────────┬────────────┘──┘
+                                      │ Ethernet
+                      ┌───────────────▼──────────────┐
+                      │          SDR Device          │
+                      │      192.168.99.234 (static) │
+                      │      Gateway: 192.168.99.1   │
+                      │  CoT UDP → 192.168.99.1:4242 │
+                      └──────────────────────────────┘
 ```
 
 ---
@@ -67,35 +108,36 @@ HaphazardBridge sits between an SDR (connected via Ethernet) and an ATAK device 
 
 | Device | Interface | IP |
 |---|---|---|
-| HaphazardBridge | WiFi (HaphazardTAK) | `192.168.10.178` (DHCP) |
+| HaphazardBridge | HaphazardNet AP | `192.168.4.1` (static) |
+| HaphazardBridge | WiFi STA (Mobility) | `192.168.10.178` (DHCP — may change) |
 | HaphazardBridge | Ethernet | `192.168.99.1` (static) |
 | SDR | Ethernet | `192.168.99.234` (static) |
-| ATAK device | WiFi | `192.168.10.123` |
-
-The ESP32's WiFi IP is assigned by DHCP and may change. Check serial output on boot for the current address.
+| ATAK device | HaphazardTAK (Mobility) | `192.168.10.123` |
+| ATAK device | HaphazardNet (Dismounted) | `192.168.4.x` (DHCP) |
 
 ---
 
 ## Data Flows
 
-### 1. gRPC (ATAK plugin → SDR sensor stream)
-- ATAK plugin connects to `192.168.10.178:8000`
-- ESP32 forwards the connection to `192.168.99.234:8000` (SDR gRPC server)
-- Sensor data streams back to ATAK through the same connection
+### Mobility Mode
 
-### 2. CoT UDP (SDR → ATAK map)
-- SDR sends UDP CoT packets to `192.168.10.123:4242`
-- NAT routes these through the ESP32's WiFi interface transparently
-- ATAK displays tracks on the map
+| Flow | Path |
+|---|---|
+| gRPC | ATAK → `192.168.10.178:8000` → ESP32 → SDR:8000 |
+| CoT UDP | SDR → `192.168.10.123:4242` via NAT |
+| SAPIENT | SDR → `192.168.10.123` outbound via NAT |
+| SDR web UI | Browser → `http://192.168.10.178:8888` → SDR:80 |
+| HaphazardNet gRPC | ATAK → `192.168.4.1:8000` → ESP32 → SDR:8000 |
+| HaphazardNet web UI | Browser → `http://192.168.4.1:8888` → SDR:80 |
 
-### 3. SAPIENT (SDR → ATAK plugin registration)
-- SDR SAPIENT client connects outbound to ATAK (`192.168.10.123`)
-- NAT handles the routing — no port forwarding needed
-- This is what populates the sensor entry in the ATAK plugin
+### Dismounted Mode
 
-### 4. SDR Web UI Proxy
-- Browse to `http://192.168.10.178:8888/` from any WiFi device
-- ESP32 proxies the connection to `192.168.99.234:80`
+| Flow | Path |
+|---|---|
+| gRPC | ATAK → `192.168.4.1:8000` → ESP32 → SDR:8000 |
+| CoT UDP | SDR → `192.168.99.1:4242` → ESP32 rebroadcasts → `192.168.4.255:4242` → ATAK |
+| SAPIENT | SDR → ATAK outbound via routing |
+| SDR web UI | Browser → `http://192.168.4.1:8888` → SDR:80 |
 
 ---
 
@@ -105,8 +147,83 @@ The ESP32's WiFi IP is assigned by DHCP and may change. Check serial output on b
 |---|---|---|
 | `8000` | WiFi (inbound) | gRPC forward to SDR |
 | `8087` | Both (inbound) | CoT TCP relay |
-| `8888` | WiFi (inbound) | SDR web UI proxy |
+| `8888` | WiFi (inbound) | SDR web UI proxy (5 concurrent connections) |
+| `4242` | ETH (inbound, Dismounted) | CoT UDP relay from SDR |
 | `3232` | WiFi | OTA update (ArduinoOTA) |
+
+---
+
+## BOOT Button Reference
+
+| Action | When | Result |
+|---|---|---|
+| **Tap** (< 1.5s) | Within 3s of boot | Cycle Mobility ↔ Dismounted |
+| **Hold** (1.5s+) | Within 3s of boot | Factory reset all config |
+| **Hold** (3s+) | During normal operation | Open config portal |
+
+### Switching modes step by step
+
+1. Press **RESET** on the board
+2. Within **3 seconds**, tap and release **BOOT**
+3. Watch your WiFi list — the AP name changes to confirm the new mode:
+   - **HaphazardNet** = Dismounted Mode active
+   - **HaphazardBridge-Setup** = Mobility Mode, searching for upstream AP
+
+---
+
+## ATAK Configuration
+
+### Mobility Mode
+| Setting | Value |
+|---|---|
+| SDR plugin socket address | `192.168.10.178:8000` *(or `192.168.4.1:8000` via HaphazardNet)* |
+| CoT UDP input port | `4242` |
+| SAPIENT client target | `192.168.10.123` (ATAK's own IP) |
+
+### Dismounted Mode
+| Setting | Value |
+|---|---|
+| SDR plugin socket address | `192.168.4.1:8000` |
+| CoT UDP input port | `4242` |
+| SAPIENT client target | ATAK's IP on HaphazardNet (check ATAK settings) |
+
+> **Version compatibility:** The ATAK SDR plugin and SDR software must be on matching versions. A mismatch shows "incompatible version" and clears the socket address.
+
+---
+
+## SDR Configuration
+
+### Mobility Mode
+| Setting | Value |
+|---|---|
+| IP address | `192.168.99.234` (static) |
+| Subnet mask | `255.255.255.0` |
+| Gateway | `192.168.99.1` |
+| CoT UDP target | `192.168.10.123:4242` |
+| SAPIENT client target | `192.168.10.123` |
+| Static location (no GPS) | Lat `38.2362`, Lon `-78.3603` (Ruckersville, VA) |
+
+### Dismounted Mode
+| Setting | Value |
+|---|---|
+| IP address | `192.168.99.234` (static) |
+| Subnet mask | `255.255.255.0` |
+| Gateway | `192.168.99.1` |
+| CoT UDP target | `192.168.99.1:4242` *(ESP32 ETH — relayed to ATAK)* |
+| SAPIENT client target | `192.168.4.x` (ATAK's IP on HaphazardNet) |
+| Static location (no GPS) | Lat `38.2362`, Lon `-78.3603` (Ruckersville, VA) |
+
+---
+
+## WiFi Configuration
+
+### Changing WiFi credentials or TAK target
+Hold **BOOT** for 3 seconds during normal operation → portal AP `HaphazardBridge-Setup` appears → connect and browse to `192.168.4.1`.
+
+### Hardcoded credentials (firmware)
+```cpp
+WiFi.begin("HaphazardTAK", "H@phazard!");
+```
 
 ---
 
@@ -114,7 +231,6 @@ The ESP32's WiFi IP is assigned by DHCP and may change. Check serial output on b
 
 ### Prerequisites
 - [PlatformIO](https://platformio.org/) (pioarduino espressif32 53.03.10 / Arduino-ESP32 3.1.0)
-- Project at `/home/haphazardlabs/Documents/HaphazardBridge/`
 
 ### Normal flash (USB)
 ```bash
@@ -122,16 +238,16 @@ cd ~/Documents/HaphazardBridge
 ~/.platformio-venv/bin/pio run -e haphazardbridge -t upload
 ```
 
-### If the board is crash-looping (can't flash normally)
+### If the board is crash-looping
 Enter ROM bootloader manually:
-1. Hold **BOOT** button
+1. Hold **BOOT**
 2. Press and release **RESET**
 3. Release **BOOT**
-4. Run the flash command above
-5. Press **RESET** once after flash completes to start the app
+4. Run the flash command
+5. Press **RESET** after flash completes to start the app
 
-### OTA flash (no USB, over WiFi)
-Edit `platformio.ini` — change:
+### OTA flash (no USB)
+Edit `platformio.ini`:
 ```ini
 upload_protocol = espota
 upload_port = 192.168.10.178
@@ -139,13 +255,10 @@ upload_flags =
     --auth=H@phazard!
     --timeout=60
 ```
-Then run the normal flash command.
 
 ---
 
 ## Serial Monitor
-
-The board uses native USB CDC. To read serial output:
 
 ```python
 python3 -c "
@@ -161,21 +274,43 @@ s.close()
 "
 ```
 
-> **Note:** Toggling DTR low then high (`dtr=False` → `dtr=True`) triggers a USB reset and reboots the board. Keep DTR high only for passive monitoring.
+> **Note:** Toggling DTR low→high reboots the board. Keep `dtr=True` only for passive monitoring.
 
-### Expected boot output
+### Expected boot output — Mobility Mode
 ```
-╔══════════════════════════╗
-║    HaphazardBridge v1.5  ║
-╚══════════════════════════╝
-[Config] TAK 192.168.10.123:8000 saved
-[Config] TAK 192.168.10.123:8000
+╔══════════════════════════════╗
+║    HaphazardBridge  v1.6     ║
+║  Mode: Mobility              ║
+╚══════════════════════════════╝
+[Mode] Mobility — tap BOOT within 3s to switch
 [ETH] Static 192.168.99.1/255.255.255.0
-[WiFi] Connecting...
-[WiFi] IP: 192.168.10.178
-[Proxy] SDR UI  → port 8888
-[CoT]   Relay   → port 8087 → 192.168.10.123:8000
-[gRPC]  Forward → port 8000 → 192.168.99.234:8000
+[WiFi] Mobility — connecting to upstream AP + HaphazardNet
+[AP] HaphazardNet up — 192.168.4.1
+[WiFi] STA IP: 192.168.10.178
+[Proxy] SDR UI   → 192.168.10.178:8888
+[CoT]   Relay    → port 8087
+[gRPC]  Forward  → 192.168.10.178:8000 → SDR
+[OTA] Ready  hostname:HaphazardBridge  port:3232
+[ETH] Link up
+[Bridge] NAT active  ETH(192.168.99.x) → WiFi
+```
+
+### Expected boot output — Dismounted Mode
+```
+╔══════════════════════════════╗
+║    HaphazardBridge  v1.6     ║
+║  Mode: Dismounted            ║
+╚══════════════════════════════╝
+[Mode] Dismounted — tap BOOT within 3s to switch
+[ETH] Static 192.168.99.1/255.255.255.0
+[WiFi] Dismounted — starting HaphazardNet AP only
+[AP] HaphazardNet up — 192.168.4.1
+[Proxy] SDR UI   → 192.168.4.1:8888
+[CoT]   Relay    → port 8087
+[gRPC]  Forward  → 192.168.4.1:8000 → SDR
+[CoT UDP] Relay  → ETH:4242 → AP broadcast
+[Config] SDR CoT UDP target: 192.168.99.1:4242
+[Config] ATAK plugin socket: 192.168.4.1:8000
 [OTA] Ready  hostname:HaphazardBridge  port:3232
 [ETH] Link up
 [Bridge] NAT active  ETH(192.168.99.x) → WiFi
@@ -183,126 +318,48 @@ s.close()
 
 ---
 
-## WiFi Configuration
-
-WiFi credentials are hardcoded in `setup()`:
-```cpp
-WiFi.begin("HaphazardTAK", "H@phazard!");
-```
-
-### Reconfiguring WiFi via captive portal
-- **During normal operation:** Hold **BOOT** for 3 seconds → ESP32 opens AP `HaphazardBridge-Setup`
-- **At power-on:** Hold **BOOT** while powering on → clears all saved WiFi + TAK config, resets to defaults
-
-Connect to `HaphazardBridge-Setup` and browse to `192.168.4.1` to configure:
-- WiFi network + password
-- TAK Server IP and port
-
----
-
-## ATAK Configuration
-
-### SDR Plugin
-| Setting | Value |
-|---|---|
-| Socket Address | `192.168.10.178:8000` |
-
-> The socket address must use the ESP32's current WiFi IP. If the DHCP lease changes, update this.
-
-> **Version compatibility:** The ATAK SDR plugin and the SDR software must be on compatible versions. A mismatch produces "incompatible version" and clears the socket address.
-
-### CoT UDP Input
-Add a UDP CoT stream in ATAK (**Settings → Network → CoT Streams → +**):
-| Setting | Value |
-|---|---|
-| Type | UDP |
-| Port | `4242` |
-
-### SAPIENT
-Enable the SAPIENT client in the SDR software and point it at the ATAK device's IP (`192.168.10.123`). NAT handles the routing — no port forwarding needed.
-
----
-
-## SDR Configuration
-
-| Setting | Value |
-|---|---|
-| IP address | `192.168.99.234` (static) |
-| Subnet mask | `255.255.255.0` |
-| Gateway | `192.168.99.1` |
-| CoT UDP client target | `192.168.10.123:4242` |
-| SAPIENT client target | `192.168.10.123` |
-| Static location (no GPS) | Lat `38.2362`, Lon `-78.3603` (Ruckersville, VA) |
-
----
-
 ## Linux Host Notes (Ubuntu Core Desktop)
 
 ### ModemManager conflict
-ModemManager grabs `/dev/ttyACM0` on USB connect and blocks serial access:
 ```bash
 sudo systemctl stop ModemManager
 ```
 
-### udev rule (already in place)
-`/etc/udev/rules.d/99-esp32.rules` grants world read/write to the ESP32's USB device (`303a:1001`) so no `sudo` is needed for flashing or monitoring.
+### udev rule
+`/etc/udev/rules.d/99-esp32.rules` grants world read/write to `303a:1001` — no `sudo` needed for flash or monitor.
 
 ---
 
 ## Firmware Internals
 
-### Why lwIP calls are deferred to `loop()`
+### lwIP core lock crash fix
 
-Arduino network event callbacks on ESP32 run on the system event task, which does **not** hold the lwIP core lock. Calling any lwIP function (`ip_napt_enable`, `NetworkServer::begin`, `ETH.config`) from a callback triggers:
-
+Arduino network event callbacks do **not** hold the lwIP core lock. Calling `ip_napt_enable`, `NetworkServer::begin`, or `ETH.config` from a callback triggers:
 ```
 assert failed: sys_timeout — Required to lock TCPIP core functionality!
 ```
 
-**Fix:** event handlers only set boolean flags. `loop()` checks those flags and does the actual work:
+**Fix:** callbacks only set flags; `loop()` does the actual work. `ip_napt_enable` is dispatched to the lwIP task via `tcpip_callback()`.
 
-```cpp
-static bool needServerSetup = false;
-static bool needNAT         = false;
+### `configEthStatic()` called only from `ETH_START`
 
-// In loop():
-if (needNAT) {
-    needNAT = false;
-    enableNAT();           // runs tcpip_callback() — safe from any task
-}
-if (needServerSetup) {
-    needServerSetup = false;
-    proxyServer.begin();   // safe from loop task
-    cotServer.begin();
-    grpcFwdServer.begin();
-    setupOTA();
-}
-```
+`ETH.config()` crashes if called from `ETH_CONNECTED` (lwIP is fully running by then). Static IP persists through link reconnects so one-time setup in `ETH_START` is sufficient.
 
-`ip_napt_enable` additionally requires running on the lwIP core task itself:
-```cpp
-static void napt_enable_cb(void *) {
-    ip_napt_enable(ipaddr_addr(ETH_IP), 1);
-}
+### Multi-connection proxy
 
-void enableNAT() {
-    tcpip_callback(napt_enable_cb, nullptr);
-}
-```
+The SDR web UI proxy maintains a pool of 5 concurrent `(browser, sdr)` connection pairs. Modern browsers open multiple simultaneous connections to load CSS, JS, and images — a single-connection proxy causes partial loads and drops.
 
-### Why `configEthStatic()` is only called from `ETH_START`
+### WiFiManager non-blocking mode
 
-`ETH.config()` touches lwIP internals. It works from `ARDUINO_EVENT_ETH_START` because the lwIP stack isn't fully running yet at that point. Calling it from `ARDUINO_EVENT_ETH_CONNECTED` (which fires later when the physical link is established) causes the same lwIP lock crash. Static IP persists through link reconnects so it only needs to be set once.
+`wm.setConfigPortalBlocking(false)` keeps `loop()` running during the portal. This ensures the BOOT button 3-second startup window is processed promptly regardless of WiFiManager state.
 
-### Non-blocking relay pattern
+### Idle timeouts
 
-All three relays (`handleProxy`, `handleCoT`, `handleGrpc`) use the same pattern — one call per `loop()` iteration, no blocking:
-
-```
-accept() → connect to target → bidirectional relay via relay() → idle timeout → close
-```
-
-Idle timeouts: proxy 8s, CoT relay 60s, gRPC forward 300s.
+| Service | Timeout |
+|---|---|
+| SDR web UI proxy | 60s |
+| CoT TCP relay | 60s |
+| gRPC forward | 300s |
 
 ---
 
